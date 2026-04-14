@@ -281,27 +281,29 @@ class _MyWidgetState extends State<MyWidget> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        KeyboardListener(
-          focusNode: FocusNode(), // wrapper focus node cho KeyboardListener
-          onKeyEvent: (event) => _handleKeyEvent(
-            focusNode,
-            controller,
-            validator,
-            prevFocus,
-            nextFocus,
-            event,
-          ),
+        Focus(
+          onKeyEvent: (node, event) {
+            final result = _handleKeyEvent(
+              focusNode,
+              controller,
+              validator,
+              prevFocus,
+              nextFocus,
+              event,
+            );
+            return result; // trả về KeyEventResult.handled để chặn bubble
+          },
           child: TextField(
             controller: controller,
             focusNode: focusNode,
             decoration: InputDecoration(labelText: label),
-            onSubmitted: (_) => _handleKeyNavigation(
-              controller: controller,
-              validator: validator,
-              currentFocus: focusNode,
-              targetFocus: nextFocus,
-              shouldMoveNext: true,
-            ),
+            // onSubmitted: (_) => _handleKeyNavigation(
+            //   controller: controller,
+            //   validator: validator,
+            //   currentFocus: focusNode,
+            //   targetFocus: nextFocus,
+            //   shouldMoveNext: true,
+            // ),
           ),
         ),
         if (error != null)

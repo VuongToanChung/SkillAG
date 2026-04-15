@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:login_ui/ui/test_focus.dart';
-import 'ui/stock_order_screen.dart';
 
 void main() {
   runApp(const MyApp());

@@ -27,54 +27,44 @@ class _MyWidgetState extends State<MyWidget> {
   String? _volumeError;
   String? _priceError;
 
-  // Flag: đánh dấu khi keyboard event đang xử lý validate
-  // để FocusNode listener KHÔNG validate lại lần 2
-  bool _isHandlingKeyEvent = false;
+  // Field đang focus (cập nhật khi user tap hoặc khi keyboard nav move focus).
+  // Dùng để biết field NÀO cần validate khi user tap sang field khác.
+  FocusNode? _lastFocusedField;
 
   // Flag: đang trong quá trình validate async (tránh duplicate call)
   bool _isValidating = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _setupFocusListeners();
+  // ==========================================================================
+  // POINTER-BASED FOCUS CHANGE
+  // Chỉ fire khi user TAP CHUỘT vào TextField. Keyboard nav KHÔNG trigger onTap.
+  // Job: validate field trước đó, hiện error, KHÔNG đụng focus (user đã click
+  // sang field mới — không được "giật" focus ngược lại).
+  // ==========================================================================
+  Future<void> _onPointerFocusChange(FocusNode tappedFocus) async {
+    final prev = _lastFocusedField;
+    _lastFocusedField = tappedFocus;
+
+    if (prev == null || prev == tappedFocus) return;
+    if (_isValidating) return;
+
+    final (controller, validator) = _fieldOf(prev);
+
+    _isValidating = true;
+    final error = await validator(controller.text);
+    _isValidating = false;
+
+    if (!mounted) return;
+    setState(() => _setError(prev, error));
   }
 
-  void _setupFocusListeners() {
-    _addFocusListener(_accountFocus, _accountController, _validateAccount);
-    _addFocusListener(_stockFocus, _stockController, _validateStock);
-    _addFocusListener(_volumeFocus, _volumeController, _validateVolume);
-    _addFocusListener(_priceFocus, _priceController, _validatePrice);
-  }
-
-  void _addFocusListener(
-    FocusNode focusNode,
-    TextEditingController controller,
-    Future<String?> Function(String) validator,
+  // Lookup controller + validator theo FocusNode
+  (TextEditingController, Future<String?> Function(String)) _fieldOf(
+    FocusNode focus,
   ) {
-    focusNode.addListener(() async {
-      // Chỉ xử lý khi LOST focus
-      if (focusNode.hasFocus) return;
-
-      // Nếu keyboard event đang xử lý → bỏ qua, tránh validate 2 lần
-      if (_isHandlingKeyEvent) return;
-
-      // Nếu đang validate rồi → bỏ qua
-      if (_isValidating) return;
-
-      _isValidating = true;
-      final error = await validator(controller.text);
-      _isValidating = false;
-
-      if (!mounted) return;
-
-      // Validate từ focus loss: dù pass hay fail đều KHÔNG chuyển focus
-      // (vì user đã tự click sang field khác rồi)
-      // Chỉ cập nhật error message
-      setState(() {
-        _setError(focusNode, error);
-      });
-    });
+    if (focus == _accountFocus) return (_accountController, _validateAccount);
+    if (focus == _stockFocus) return (_stockController, _validateStock);
+    if (focus == _volumeFocus) return (_volumeController, _validateVolume);
+    return (_priceController, _validatePrice);
   }
 
   // Gán error cho đúng field dựa vào focusNode
@@ -136,34 +126,25 @@ class _MyWidgetState extends State<MyWidget> {
   }) async {
     if (_isValidating) return;
 
-    // Bật flag để FocusNode listener biết mà bỏ qua
-    _isHandlingKeyEvent = true;
     _isValidating = true;
-
     final error = await validator(controller.text);
-
     _isValidating = false;
 
-    if (!mounted) {
-      _isHandlingKeyEvent = false;
-      return;
-    }
+    if (!mounted) return;
 
     setState(() {
       _setError(currentFocus, error);
     });
 
-    if (error == null) {
-      // Validate pass → chuyển focus sang field tiếp/trước
-      targetFocus?.requestFocus();
+    if (error == null && targetFocus != null) {
+      // Pass → move focus sang field tiếp/trước
+      _lastFocusedField = targetFocus;
+      targetFocus.requestFocus();
     } else {
-      // Validate fail → giữ nguyên focus
+      // Fail (hoặc không có target) → giữ focus
+      _lastFocusedField = currentFocus;
       currentFocus.requestFocus();
     }
-
-    // Tắt flag sau khi focus đã được set
-    // Dùng microtask để đảm bảo FocusNode listener chạy trước khi flag tắt
-    Future.microtask(() => _isHandlingKeyEvent = false);
   }
 
   // ---- Validators (có async/API call) ----
@@ -296,14 +277,8 @@ class _MyWidgetState extends State<MyWidget> {
           child: TextField(
             controller: controller,
             focusNode: focusNode,
+            onTap: () => _onPointerFocusChange(focusNode),
             decoration: InputDecoration(labelText: label),
-            // onSubmitted: (_) => _handleKeyNavigation(
-            //   controller: controller,
-            //   validator: validator,
-            //   currentFocus: focusNode,
-            //   targetFocus: nextFocus,
-            //   shouldMoveNext: true,
-            // ),
           ),
         ),
         if (error != null)

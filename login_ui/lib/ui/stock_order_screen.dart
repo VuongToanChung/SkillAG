@@ -119,7 +119,7 @@ class _StockOrderScreenState extends State<StockOrderScreen> {
         _sampleStocks[_random.nextInt(_sampleStocks.length)];
     _volumeController.text = '${(_random.nextInt(100) + 1) * 100}'; // 100‑10000
     _priceController.text =
-        '${(_random.nextDouble() * 150 + 10).toStringAsFixed(1)}'; // 10.0‑160.0
+        (_random.nextDouble() * 150 + 10).toStringAsFixed(1); // 10.0‑160.0
   }
 
   // ── Action: Quick Buy ────────────────────────────────────────────────

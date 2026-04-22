@@ -1,14 +1,41 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
-class MyWidget extends StatefulWidget {
+import 'field_validation_cubit.dart';
+import 'models.dart';
+
+enum FormMode {
+  normal, // tự nhập
+  edit, // Sửa: account+stock readOnly, volume+price editable
+  cancel, // Hủy: tất cả readOnly
+}
+
+class MyWidget extends StatelessWidget {
   const MyWidget({super.key});
 
   @override
-  State<MyWidget> createState() => _MyWidgetState();
+  Widget build(BuildContext context) {
+    return MultiBlocProvider(
+      providers: [
+        BlocProvider(create: (_) => AccountCubit()),
+        BlocProvider(create: (_) => StockCubit()),
+        BlocProvider(create: (_) => VolumeCubit()),
+        BlocProvider(create: (_) => PriceCubit()),
+      ],
+      child: const _StockOrderView(),
+    );
+  }
 }
 
-class _MyWidgetState extends State<MyWidget> {
+class _StockOrderView extends StatefulWidget {
+  const _StockOrderView();
+
+  @override
+  State<_StockOrderView> createState() => _StockOrderViewState();
+}
+
+class _StockOrderViewState extends State<_StockOrderView> {
   // Controllers
   final TextEditingController _accountController = TextEditingController();
   final TextEditingController _stockController = TextEditingController();
@@ -27,24 +54,41 @@ class _MyWidgetState extends State<MyWidget> {
   String? _volumeError;
   String? _priceError;
 
+  // Models nhận về khi validate pass (từ cubit stream)
+  AccountModel? _accountModel;
+  StockModel? _stockModel;
+  VolumeModel? _volumeModel;
+  PriceModel? _priceModel;
+
   // Field đang focus (cập nhật khi user tap hoặc khi keyboard nav move focus).
-  // Dùng để biết field NÀO cần validate khi user tap sang field khác.
   FocusNode? _lastFocusedField;
 
   // Flag: đang trong quá trình validate async (tránh duplicate call)
   bool _isValidating = false;
 
+  // Mode hiện tại của form (normal / edit / cancel)
+  FormMode _mode = FormMode.normal;
+
+  bool _isReadOnly(FocusNode focus) {
+    if (_mode == FormMode.cancel) return true;
+    if (_mode == FormMode.edit) {
+      return focus == _accountFocus || focus == _stockFocus;
+    }
+    return false;
+  }
+
   // ==========================================================================
   // POINTER-BASED FOCUS CHANGE
   // Chỉ fire khi user TAP CHUỘT vào TextField. Keyboard nav KHÔNG trigger onTap.
-  // Job: validate field trước đó, hiện error, KHÔNG đụng focus (user đã click
-  // sang field mới — không được "giật" focus ngược lại).
+  // Validate field trước đó. Nếu fail → snap focus back về field cũ.
   // ==========================================================================
   Future<void> _onPointerFocusChange(FocusNode tappedFocus) async {
     final prev = _lastFocusedField;
-    _lastFocusedField = tappedFocus;
 
-    if (prev == null || prev == tappedFocus) return;
+    if (prev == null || prev == tappedFocus) {
+      _lastFocusedField = tappedFocus;
+      return;
+    }
     if (_isValidating) return;
 
     final (controller, validator) = _fieldOf(prev);
@@ -55,6 +99,14 @@ class _MyWidgetState extends State<MyWidget> {
 
     if (!mounted) return;
     setState(() => _setError(prev, error));
+
+    if (error != null) {
+      // Fail → snap focus về field cũ
+      tappedFocus.unfocus();
+      prev.requestFocus();
+    } else {
+      _lastFocusedField = tappedFocus;
+    }
   }
 
   // Lookup controller + validator theo FocusNode
@@ -69,14 +121,15 @@ class _MyWidgetState extends State<MyWidget> {
 
   // Gán error cho đúng field dựa vào focusNode
   void _setError(FocusNode focusNode, String? error) {
-    if (focusNode == _accountFocus)
+    if (focusNode == _accountFocus) {
       _accountError = error;
-    else if (focusNode == _stockFocus)
+    } else if (focusNode == _stockFocus) {
       _stockError = error;
-    else if (focusNode == _volumeFocus)
+    } else if (focusNode == _volumeFocus) {
       _volumeError = error;
-    else if (focusNode == _priceFocus)
+    } else if (focusNode == _priceFocus) {
       _priceError = error;
+    }
   }
 
   // Xử lý keyboard events (Enter, Tab, Shift+Tab, Arrow)
@@ -137,48 +190,185 @@ class _MyWidgetState extends State<MyWidget> {
     });
 
     if (error == null && targetFocus != null) {
-      // Pass → move focus sang field tiếp/trước
       _lastFocusedField = targetFocus;
       targetFocus.requestFocus();
     } else {
-      // Fail (hoặc không có target) → giữ focus
       _lastFocusedField = currentFocus;
       currentFocus.requestFocus();
     }
   }
 
-  // ---- Validators (có async/API call) ----
+  // ==========================================================================
+  // Validators — mỗi field: (1) check local, (2) dispatch cubit, (3) await state
+  // ==========================================================================
+
+  // Dispatch cubit.validate(), await tới khi ra Success<T> hoặc Failure.
+  // - Success → gọi onSuccess(data), trả về null (pass).
+  // - Failure → trả về message (fail, hiển thị dưới field).
+  Future<String?> _runCubitValidation<T, C extends FieldValidationCubit<T>>(
+    String value, {
+    required void Function(T data) onSuccess,
+  }) async {
+    final cubit = context.read<C>();
+    cubit.validate(value);
+
+    final state = await cubit.stream
+        .firstWhere(
+          (s) =>
+              s is FieldValidationSuccess<T> || s is FieldValidationFailure<T>,
+        )
+        .timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => FieldValidationFailure<T>('Timeout'),
+        );
+
+    switch (state) {
+      case FieldValidationSuccess<T>(data: final data):
+        onSuccess(data);
+        return null;
+      case FieldValidationFailure<T>(message: final msg):
+        return msg;
+      default:
+        return null;
+    }
+  }
 
   Future<String?> _validateAccount(String value) async {
     if (value.isEmpty) return 'Account không được để trống';
-    // await apiService.validateAccount(value);
-    await Future.delayed(Duration(milliseconds: 300)); // simulate API
-    print('_validateAccount');
-    return null; // null = không có lỗi
+    return _runCubitValidation<AccountModel, AccountCubit>(
+      value,
+      onSuccess: (m) {
+        _accountModel = m;
+        debugPrint('✓ Account pass → $_accountModel');
+      },
+    );
   }
 
   Future<String?> _validateStock(String value) async {
     if (value.isEmpty) return 'Stock không được để trống';
-    await Future.delayed(Duration(milliseconds: 300));
-    print('_validateStock');
-
-    return null;
+    return _runCubitValidation<StockModel, StockCubit>(
+      value,
+      onSuccess: (m) {
+        _stockModel = m;
+        debugPrint('✓ Stock pass → $_stockModel');
+      },
+    );
   }
 
   Future<String?> _validateVolume(String value) async {
     if (value.isEmpty) return 'Volume không được để trống';
     if (int.tryParse(value) == null) return 'Volume phải là số';
-    print('_validateVolume');
-
-    return null;
+    return _runCubitValidation<VolumeModel, VolumeCubit>(
+      value,
+      onSuccess: (m) {
+        _volumeModel = m;
+        debugPrint('✓ Volume pass → $_volumeModel');
+      },
+    );
   }
 
   Future<String?> _validatePrice(String value) async {
     if (value.isEmpty) return 'Price không được để trống';
     if (double.tryParse(value) == null) return 'Price phải là số';
-    print('_validatePrice');
+    return _runCubitValidation<PriceModel, PriceCubit>(
+      value,
+      onSuccess: (m) {
+        _priceModel = m;
+        debugPrint('✓ Price pass → $_priceModel');
+      },
+    );
+  }
 
-    return null;
+  // ==========================================================================
+  // SILENT VALIDATE — chạy validator + show error, KHÔNG đụng focus.
+  // Dùng khi fill giá trị bằng code (Sửa / Hủy).
+  // ==========================================================================
+  Future<void> _silentValidate(FocusNode focus) async {
+    final (controller, validator) = _fieldOf(focus);
+    final error = await validator(controller.text);
+    if (!mounted) return;
+    setState(() => _setError(focus, error));
+  }
+
+  // Mock data fill khi click Sửa / Hủy. Đổi tuỳ ý để test pass/fail.
+  static const _mockAccount = 'ACC001';
+  static const _mockStock = 'AAPL';
+  static const _mockVolume = '100';
+  static const _mockPrice = '50.5';
+
+  void _onNewPressed() {
+    if (_isValidating) return;
+    setState(() {
+      _mode = FormMode.normal;
+      _accountController.clear();
+      _stockController.clear();
+      _volumeController.clear();
+      _priceController.clear();
+      _accountError = null;
+      _stockError = null;
+      _volumeError = null;
+      _priceError = null;
+      _accountModel = null;
+      _stockModel = null;
+      _volumeModel = null;
+      _priceModel = null;
+    });
+    _lastFocusedField = _accountFocus;
+    _accountFocus.requestFocus();
+  }
+
+  Future<void> _onEditPressed() async {
+    if (_isValidating) return;
+    _isValidating = true;
+
+    setState(() {
+      _mode = FormMode.edit;
+      _accountController.text = _mockAccount;
+      _stockController.text = _mockStock;
+      _accountError = null;
+      _stockError = null;
+      _volumeError = null;
+      _priceError = null;
+    });
+
+    // Validate 2 ô vừa fill, không snap focus
+    await _silentValidate(_accountFocus);
+    await _silentValidate(_stockFocus);
+
+    _isValidating = false;
+    if (!mounted) return;
+    // Focus vào volume cho user nhập
+    _lastFocusedField = _volumeFocus;
+    _volumeFocus.requestFocus();
+  }
+
+  Future<void> _onCancelPressed() async {
+    if (_isValidating) return;
+    _isValidating = true;
+
+    setState(() {
+      _mode = FormMode.cancel;
+      _accountController.text = _mockAccount;
+      _stockController.text = _mockStock;
+      _volumeController.text = _mockVolume;
+      _priceController.text = _mockPrice;
+      _accountError = null;
+      _stockError = null;
+      _volumeError = null;
+      _priceError = null;
+    });
+
+    // Validate 4 ô lần lượt, không snap focus
+    await _silentValidate(_accountFocus);
+    await _silentValidate(_stockFocus);
+    await _silentValidate(_volumeFocus);
+    await _silentValidate(_priceFocus);
+
+    _isValidating = false;
+    if (!mounted) return;
+    // Cancel mode: tất cả readOnly, bỏ focus
+    FocusManager.instance.primaryFocus?.unfocus();
+    _lastFocusedField = null;
   }
 
   // ---- Build ----
@@ -208,6 +398,39 @@ class _MyWidgetState extends State<MyWidget> {
       body: SafeArea(
         child: Column(
           children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 12,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isValidating ? null : _onNewPressed,
+                      icon: const Icon(Icons.note_add),
+                      label: const Text('New'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isValidating ? null : _onEditPressed,
+                      icon: const Icon(Icons.edit),
+                      label: const Text('Sửa'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isValidating ? null : _onCancelPressed,
+                      icon: const Icon(Icons.cancel),
+                      label: const Text('Hủy'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             _buildField(
               label: 'Account',
               controller: _accountController,
@@ -259,12 +482,18 @@ class _MyWidgetState extends State<MyWidget> {
     required FocusNode? prevFocus,
     required FocusNode? nextFocus,
   }) {
+    final readOnly = _isReadOnly(focusNode);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Focus(
           onKeyEvent: (node, event) {
-            final result = _handleKeyEvent(
+            // Trong cancel mode (full readOnly) bỏ qua keyboard nav,
+            // tránh chạy validate vô nghĩa.
+            if (readOnly && _mode == FormMode.cancel) {
+              return KeyEventResult.ignored;
+            }
+            return _handleKeyEvent(
               focusNode,
               controller,
               validator,
@@ -272,17 +501,21 @@ class _MyWidgetState extends State<MyWidget> {
               nextFocus,
               event,
             );
-            return result; // trả về KeyEventResult.handled để chặn bubble
           },
           child: TextField(
             controller: controller,
             focusNode: focusNode,
+            readOnly: readOnly,
             onTap: () => _onPointerFocusChange(focusNode),
-            decoration: InputDecoration(labelText: label),
+            decoration: InputDecoration(
+              labelText: label,
+              filled: readOnly,
+              fillColor: readOnly ? Colors.white12 : null,
+            ),
           ),
         ),
         if (error != null)
-          Text(error, style: TextStyle(color: Colors.red, fontSize: 12)),
+          Text(error, style: const TextStyle(color: Colors.red, fontSize: 12)),
       ],
     );
   }

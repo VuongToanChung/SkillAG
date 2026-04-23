@@ -4,6 +4,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import 'field_validation_cubit.dart';
 import 'models.dart';
+import 'select_account_cubit.dart';
 
 enum FormMode {
   normal, // tự nhập
@@ -19,6 +20,10 @@ class MyWidget extends StatelessWidget {
     return MultiBlocProvider(
       providers: [
         BlocProvider(create: (_) => AccountCubit()),
+        // SelectAccountCubit phụ thuộc AccountCubit → phải ở sau
+        BlocProvider(
+          create: (ctx) => SelectAccountCubit(ctx.read<AccountCubit>()),
+        ),
         BlocProvider(create: (_) => StockCubit()),
         BlocProvider(create: (_) => VolumeCubit()),
         BlocProvider(create: (_) => PriceCubit()),
@@ -235,13 +240,32 @@ class _StockOrderViewState extends State<_StockOrderView> {
 
   Future<String?> _validateAccount(String value) async {
     if (value.isEmpty) return 'Account không được để trống';
-    return _runCubitValidation<AccountModel, AccountCubit>(
-      value,
-      onSuccess: (m) {
+
+    final selectCubit = context.read<SelectAccountCubit>();
+
+    // Bắn vào SelectAccountCubit (share + trigger AccountCubit.requestAPI)
+    selectCubit.select(value);
+
+    // Lắng nghe response từ SelectAccountCubit (nó forward từ AccountCubit)
+    final state = await selectCubit.stream
+        .firstWhere(
+          (s) => s is SelectAccountReceived || s is SelectAccountError,
+        )
+        .timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => const SelectAccountError('Timeout'),
+        );
+
+    switch (state) {
+      case SelectAccountReceived(model: final m):
         _accountModel = m;
         debugPrint('✓ Account pass → $_accountModel');
-      },
-    );
+        return null;
+      case SelectAccountError(message: final msg):
+        return msg;
+      default:
+        return null;
+    }
   }
 
   Future<String?> _validateStock(String value) async {
